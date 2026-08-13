@@ -1,0 +1,271 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "actum-intelligence.fullname" . }}
+  labels:
+    {{- include "actum-intelligence.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: {{ .Values.updateStrategy.type }}
+    {{- if eq .Values.updateStrategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxSurge: {{ .Values.updateStrategy.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ .Values.updateStrategy.rollingUpdate.maxUnavailable }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "actum-intelligence.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "actum-intelligence.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/values: {{ toYaml .Values | sha256sum }}
+        {{- if .Values.metrics.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metrics.port | quote }}
+        prometheus.io/path: {{ .Values.metrics.path | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "actum-intelligence.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      restartPolicy: {{ .Values.restartPolicy }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # ------------------------------------------------------------------
+      # GPU node scheduling: only schedule onto nodes that both advertise
+      # the GPU capacity label AND carry the matching taint tolerations.
+      # This keeps GPU-hungry inference pods off general-purpose CPU nodes
+      # and, conversely, keeps non-GPU workloads off the expensive GPU pool.
+      # ------------------------------------------------------------------
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+
+      # An init container fails the pod fast (before the expensive GPU
+      # scheduling slot is held for an inference container that can never
+      # become ready) if the model cache PVC is not writable, catching
+      # storage misconfiguration at rollout time rather than after a long
+      # model-loading startup probe timeout.
+      initContainers:
+        - name: verify-model-cache-writable
+          image: busybox:1.36.1
+          command:
+            - "sh"
+            - "-c"
+            - |
+              set -eu
+              echo "Verifying model cache volume is writable at {{ .Values.modelCache.mountPath }}"
+              touch "{{ .Values.modelCache.mountPath }}/.actum-write-check"
+              rm -f "{{ .Values.modelCache.mountPath }}/.actum-write-check"
+              echo "Model cache volume OK."
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ .Values.modelCache.mountPath }}
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+
+      containers:
+        - name: vllm-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+
+          args:
+            - "--model"
+            - {{ .Values.vllm.model | quote }}
+            - "--served-model-name"
+            - {{ .Values.vllm.servedModelName | quote }}
+            - "--dtype"
+            - {{ .Values.vllm.dtype | quote }}
+            - "--max-model-len"
+            - {{ .Values.vllm.maxModelLen | quote }}
+            - "--gpu-memory-utilization"
+            - {{ .Values.vllm.gpuMemoryUtilization | quote }}
+            - "--tensor-parallel-size"
+            - {{ .Values.vllm.tensorParallelSize | quote }}
+            - "--pipeline-parallel-size"
+            - {{ .Values.vllm.pipelineParallelSize | quote }}
+            - "--max-num-seqs"
+            - {{ .Values.vllm.maxNumSeqs | quote }}
+            - "--swap-space"
+            - {{ .Values.vllm.swapSpaceGb | quote }}
+            {{- if .Values.vllm.enablePrefixCaching }}
+            - "--enable-prefix-caching"
+            {{- end }}
+            {{- if .Values.vllm.disableLogRequests }}
+            - "--disable-log-requests"
+            {{- end }}
+            {{- if .Values.vllm.trustRemoteCode }}
+            - "--trust-remote-code"
+            {{- end }}
+            {{- if .Values.vllm.quantization }}
+            - "--quantization"
+            - {{ .Values.vllm.quantization | quote }}
+            {{- end }}
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - {{ .Values.service.targetPort | quote }}
+            {{- range .Values.vllm.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+
+          ports:
+            - name: http-inference
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+
+          env:
+            - name: HF_HOME
+              value: {{ .Values.modelCache.mountPath | quote }}
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: "spawn"
+            {{- if .Values.vllm.apiKeySecretName }}
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vllm.apiKeySecretName }}
+                  key: api-key
+            {{- end }}
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vllm.apiKeySecretName }}
+                  key: hf-token
+                  optional: true
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          # ------------------------------------------------------------------
+          # Health probing against vLLM's built-in OpenAI-compatible /health
+          # endpoint. A dedicated startup probe absorbs the (often multi-
+          # minute) model-weight loading time so liveness/readiness periods
+          # can stay tight once the server is actually up, without either
+          # probe prematurely killing the pod during initial model load.
+          # ------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http-inference
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http-inference
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            successThreshold: {{ .Values.probes.liveness.successThreshold }}
+
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http-inference
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            successThreshold: {{ .Values.probes.readiness.successThreshold }}
+
+          # SIGTERM is forwarded to the vLLM async engine, which stops
+          # accepting new requests but lets in-flight generations complete
+          # up to terminationGracePeriodSeconds — avoiding truncated
+          # responses on rollouts/scale-downs.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ .Values.modelCache.mountPath }}
+            - name: dshm
+              mountPath: /dev/shm
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+      volumes:
+        - name: model-cache
+          {{- if .Values.modelCache.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "actum-intelligence.fullname" . }}-model-cache
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        # A dedicated, explicitly-sized shared-memory volume backing
+        # /dev/shm: vLLM's tensor-parallel workers and Ray object store rely
+        # on POSIX shared memory for zero-copy inter-process communication,
+        # and the Kubernetes/Docker default of 64Mi is insufficient and will
+        # cause opaque OOM-style crashes under real load.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.shmSizeLimit }}
+        # Writable scratch space for vLLM's JIT/kernel compilation cache,
+        # kept separate from the read-mostly model cache volume.
+        - name: tmp
+          emptyDir:
+            sizeLimit: "4Gi"
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- if .Values.modelCache.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "actum-intelligence.fullname" . }}-model-cache
+  labels:
+    {{- include "actum-intelligence.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.modelCache.accessMode }}
+  storageClassName: {{ .Values.modelCache.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.modelCache.size }}
+{{- end }}
