@@ -1,0 +1,40 @@
+apiVersion: v2
+name: actum-intelligence
+description: >-
+  Actum Intelligence Platform — a production Helm chart deploying a scalable,
+  GPU-aware vLLM inference service exposing an OpenAI-compatible API on
+  Kubernetes, with autoscaling, health probing, and Hugging Face model-cache
+  persistence built in.
+type: application
+
+# Chart version follows SemVer independently of the application version it
+# packages (appVersion tracks the vLLM/model runtime image tag).
+version: 1.2.0
+appVersion: "0.6.3"
+
+kubeVersion: ">=1.27.0-0"
+
+keywords:
+  - llm
+  - vllm
+  - inference
+  - gpu
+  - machine-learning
+  - kubernetes
+  - openai-compatible
+  - mlops
+  - llmops
+
+home: https://github.com/actum-ai/actum-intelligence-platform
+sources:
+  - https://github.com/actum-ai/actum-intelligence-platform
+
+maintainers:
+  - name: Actum AI Platform Team
+    email: platform-eng@actum.ai
+
+icon: https://raw.githubusercontent.com/actum-ai/actum-intelligence-platform/main/assets/logo.png
+
+annotations:
+  category: AI/ML
+  licenses: Apache-2.0
