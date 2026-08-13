@@ -1,0 +1,33 @@
+Actum Intelligence Platform has been deployed as "{{ include "actum-intelligence.fullname" . }}"
+in namespace "{{ .Release.Namespace }}".
+
+Model being served: {{ .Values.vllm.model }}
+Served model name (OpenAI API `model` field): {{ .Values.vllm.servedModelName }}
+Replicas: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} (HPA-managed){{ else }}{{ .Values.replicaCount }} (fixed){{ end }}
+
+1. Check rollout status (first startup can take several minutes while
+   model weights download/load onto the GPU):
+
+     kubectl rollout status deployment/{{ include "actum-intelligence.fullname" . }} -n {{ .Release.Namespace }}
+
+2. Port-forward the inference service to your local machine:
+
+     kubectl port-forward svc/{{ include "actum-intelligence.fullname" . }} 8080:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+
+3. Send an OpenAI-compatible request:
+
+     curl http://localhost:8080/v1/chat/completions \
+       -H "Content-Type: application/json" \
+       {{- if .Values.vllm.apiKeySecretName }}
+       -H "Authorization: Bearer $VLLM_API_KEY" \
+       {{- end }}
+       -d '{
+             "model": "{{ .Values.vllm.servedModelName }}",
+             "messages": [{"role": "user", "content": "Hello!"}]
+           }'
+
+4. Inspect GPU-aware autoscaling status:
+
+     kubectl get hpa {{ include "actum-intelligence.fullname" . }} -n {{ .Release.Namespace }}
+
+For full architecture and GPU capacity-planning documentation, see README.md.

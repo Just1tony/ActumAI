@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "actum-intelligence.fullname" . }}
+  labels:
+    {{- include "actum-intelligence.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  # Session affinity is intentionally left at "None" (round-robin): vLLM's
+  # continuous batching engine is stateless from the client's perspective —
+  # KV-cache state lives inside a single replica's GPU memory per request,
+  # not across requests — so there is no correctness reason to pin a client
+  # to one pod, and doing so would only create hot-spotting under
+  # autoscaling.
+  sessionAffinity: None
+  ports:
+    - name: http-inference
+      port: {{ .Values.service.port }}
+      targetPort: http-inference
+      protocol: TCP
+  selector:
+    {{- include "actum-intelligence.selectorLabels" . | nindent 4 }}
